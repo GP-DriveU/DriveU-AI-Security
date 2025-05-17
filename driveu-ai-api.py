@@ -55,7 +55,7 @@ async def summarize(request: SummaryRequest):
             max_output_tokens=300
         )
 
-        summary = response.output_text.strip
+        summary = response.output_text.strip()
 
         return {
             "file_id": request.file_id,

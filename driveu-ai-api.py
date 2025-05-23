@@ -109,16 +109,18 @@ async def summarize(request: SummaryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# 문제 생성 API
+
 
 @app.post("/api/ai/generate")
 async def generate_questions(request: QuestionRequest):
-
+    # 요청된 텍스트가 안전한지 검사
     if not all(is_prompt_safe(text) for text in request.texts):
         raise HTTPException(
             status_code=400,
             detail="⚠️ 사용자의 입력에 시스템 지침을 무력화하려는 문장이 포함되어 있어 문제를 생성할 수 없습니다."
         )
-
+    # 문제 생성 요청
     try:
         # 모든 텍스트를 하나로 연결
         combined_text = "\n\n".join(request.texts)
@@ -173,4 +175,4 @@ async def generate_questions(request: QuestionRequest):
 
 @app.get("/")
 async def root():
-    return {"message": "Hello, World!"}
+    return {"message": "This is the DriveU AI API."}

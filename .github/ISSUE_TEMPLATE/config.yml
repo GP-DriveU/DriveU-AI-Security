@@ -1,0 +1,6 @@
+﻿blank_issues_enabled: false
+issue_templates:
+  - name: Feature request
+    description: Suggest a new idea or improvement for the project
+    labels: [enhancement]
+    file: feature_request.md

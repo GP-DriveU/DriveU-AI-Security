@@ -62,7 +62,7 @@ def is_prompt_safe(text: str) -> bool:
 # 요약 API
 @app.post("/api/ai/summary")
 async def summarize(request: SummaryRequest):
-    if not is_prompt_safe(request.text):
+    if not is_prompt_safe(request.content):
         raise HTTPException(
             status_code=400,
             detail="⚠️ 사용자의 입력에 시스템 지침을 무력화하려는 문장이 포함되어 있어 요약할 수 없습니다."
@@ -74,7 +74,7 @@ async def summarize(request: SummaryRequest):
         prompt = f"""
         다음 텍스트를 핵심 위주로 3문장 이내로 요약해줘:
 
-        {request.text}
+        {request.content}
         """
 
         response = client.responses.create(

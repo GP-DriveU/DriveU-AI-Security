@@ -3,11 +3,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
-from openai import OpenAI
+from openai import OpenAI, AssistantEventHandler
 from typing import List
 import json
 import time
 import re
+import io
+from typing_extensions import override
+
 
 # 환경 변수 로드
 load_dotenv()
@@ -17,6 +20,37 @@ client = OpenAI(
 )
 
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
+
+
+class EventHandler(AssistantEventHandler):
+    def __init__(self):
+        super().__init__()
+        self.final_text = ""
+        self.citations = []
+
+    @override
+    def on_text_created(self, text):
+        print(f"\nassistant > ", end="", flush=True)
+
+    @override
+    def on_tool_call_created(self, tool_call):
+        print(f"\nassistant > {tool_call.type}\n", flush=True)
+
+    @override
+    def on_message_done(self, message):
+        message_content = message.content[0].text
+        annotations = message_content.annotations
+        for index, annotation in enumerate(annotations):
+            message_content.value = message_content.value.replace(
+                annotation.text, f"[{index}]"
+            )
+            if file_citation := getattr(annotation, "file_citation", None):
+                cited_file = client.files.retrieve(file_citation.file_id)
+                self.citations.append(f"[{index}] {cited_file.filename}")
+        self.final_text = message_content.value
+
+
+
 
 # FastAPI 앱 정의
 app = FastAPI()
@@ -105,7 +139,6 @@ async def summarize(request: SummaryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/api/ai/generate")
 async def generate_questions(files: List[UploadFile] = File(...)):
     try:
@@ -115,36 +148,39 @@ async def generate_questions(files: List[UploadFile] = File(...)):
         for file in files:
             try:
                 content = await file.read()
-                print(f"파일 {file.filename} 크기: {len(content)} bytes")
+                filename = file.filename or "uploaded.txt"
+                if '.' not in filename:
+                    filename += ".txt"
+
+                print(f"파일명: {filename}, 크기: {len(content)} bytes")
+                print("파일 내용 (앞 300자):")
+                print(content.decode("utf-8", errors="replace")[:300])
+
                 uploaded = client.files.create(
-                    file=(file.filename, content),
+                    file=(filename, io.BytesIO(content)),
                     purpose="assistants"
                 )
-                print(f"파일 {file.filename} 업로드 성공, ID: {uploaded.id}")
                 file_ids.append(uploaded.id)
+                print(f"업로드 성공 → ID: {uploaded.id}")
             except Exception as e:
-                raise HTTPException(
-                    status_code=500, detail=f"파일 {file.filename} 업로드 실패: {str(e)}"
-                )
+                raise HTTPException(status_code=500, detail=f"파일 {file.filename} 업로드 실패: {str(e)}")
 
         if not file_ids:
             raise HTTPException(status_code=400, detail="업로드된 파일이 없습니다.")
 
         # ✅ 2. message.attachments 구성
-        attachments = [
-            {"file_id": fid, "tools": [{"type": "file_search"}]} for fid in file_ids
-        ]
+        attachments = [{"file_id": fid, "tools": [{"type": "file_search"}]} for fid in file_ids]
 
-        # ✅ 4. Thread 생성 + 메시지 전송
+        # ✅ 3. Thread 생성 및 메시지 전송
         thread = client.beta.threads.create(
             messages=[
                 {
                     "role": "user",
                     "content": (
-                        "업로드한 파일의 내용을 반드시 기반으로만 문제를 만들어줘."
-                        "파일에 포함된 내용이 아닌 것은 절대 문제로 만들지 마."
-                        "반드시 파일 검색 결과에 근거한 문제만 생성해. 문제, 정답들은 모두 한국어로 출력해. 아래에 출력해야 할 JSON 문자열 형식을 알려줄게."
-                        "객관식 2문제와 주관식 1문제를 아래 JSON 형식으로 출력해:\n"
+                        "업로드한 파일의 내용을 반드시 기반으로만 문제를 만들어줘. "
+                        "파일에 포함된 내용이 아닌 것은 절대 문제로 만들지 마. "
+                        "반드시 파일 검색 결과에 근거한 문제만 생성해. "
+                        "문제, 정답들은 모두 한국어로 출력해. 아래에 출력해야 할 JSON 형식을 알려줄게.\n"
                         "{\n"
                         "  \"questions\": [\n"
                         "    { \"type\": \"multiple_choice\", \"question\": \"...\", \"options\": [\"...\"], \"answer\": \"...\" },\n"
@@ -152,56 +188,40 @@ async def generate_questions(files: List[UploadFile] = File(...)):
                         "    { \"type\": \"short_answer\", \"question\": \"...\", \"answer\": \"...\" }\n"
                         "  ]\n"
                         "}\n\n"
-                        "**반드시 위 JSON 형식 그대로만 출력해. 설명이나 텍스트를 추가하지 마.**"
-                        "만약 파일 읽기에 실패했으면, 파일 읽기에 실패했다는 메시지를 JSON 형식으로 출력해:\n"
+                        "**반드시 위 JSON 형식 그대로만 출력해. 설명이나 텍스트를 추가하지 마.** "
+                        "파일 읽기에 실패했다면, 실패 메세지만을 출력해:\n"
                     ),
                     "attachments": attachments
                 }
             ]
-
         )
 
-        # ✅ 2초 정도 대기 (파일 인덱싱 처리 대기)
-        time.sleep(5)
+        time.sleep(5)  # 파일 인덱싱 대기
 
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            run = client.beta.threads.runs.create_and_poll(
-                thread_id=thread.id,
-                assistant_id=ASSISTANT_ID,
-            )
-            messages = list(
-                client.beta.threads.messages.list(thread_id=thread.id))
-            content = messages[-1].content[0].text.value
-            if "파일을 읽지 못" not in content:
-                break  # 성공
-            time.sleep(2)  # 인덱싱 대기 후 재시도
+        # ✅ 4. Streaming 방식 Run 생성 및 실행
+        handler = EventHandler()
+        with client.beta.threads.runs.stream(
+            thread_id=thread.id,
+            assistant_id=ASSISTANT_ID,
+            event_handler=handler,
+            include=["step_details.tool_calls[*].file_search.results[*].content"]
+        ) as stream:
+            stream.until_done()
 
-        messages = list(client.beta.threads.messages.list(
-            thread_id=thread.id, run_id=run.id))
-        content_block = messages[0].content[0]
+        # ✅ 5. 출력 파싱 및 JSON 반환
+        raw_text = handler.final_text
+        print("\n최종 생성된 텍스트:")
+        print(raw_text)
 
-        print(f"AI 응답: {content_block.type}")
-        print(f"AI 응답 내용: {content_block.text.value}")
+        cleaned = re.sub(r"^```json\n|\n```$", "", raw_text.strip())
+        parsed = json.loads(cleaned)
+        return {"questions": parsed["questions"]}
 
-        if content_block.type == "text":
-            try:
-                # 1. 모델 응답 텍스트
-                raw_text = content_block.text.value
-
-                # 2. 코드 블록 제거
-                cleaned = re.sub(r"^```json\n|\n```$", "", raw_text.strip())
-                parsed = json.loads(cleaned)
-                return {"questions": parsed["questions"]}
-            except json.JSONDecodeError:
-                raise HTTPException(
-                    status_code=500, detail="AI 응답이 JSON 문자열이 아님")
-        else:
-            raise HTTPException(
-                status_code=500, detail=f"예상치 못한 응답 형식: {content_block.type}")
-
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="AI 응답이 JSON 형식이 아닙니다.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/")

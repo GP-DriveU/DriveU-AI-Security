@@ -215,6 +215,15 @@ async def generate_questions(files: List[UploadFile] = File(...)):
 
         cleaned = re.sub(r"^```json\n|\n```$", "", raw_text.strip())
         parsed = json.loads(cleaned)
+
+        # 6. 파일 삭제
+        for fid in file_ids:
+            try:
+                client.files.delete(fid)
+                print(f"🗑️ Deleted file: {fid}")
+            except Exception as e:
+                print(f"❌ Failed to delete file {fid}: {e}")
+
         return {"questions": parsed["questions"]}
 
     except json.JSONDecodeError:
